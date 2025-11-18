@@ -76,6 +76,7 @@
 	  <Folder Include="Application\CommandHandlers\Basic\" />
 	  <Folder Include="Application\Services\Http\" />
 	  <Folder Include="Queries\Payment\" />
+	  <Folder Include="Services\EmailServices\" />
 	  <Folder Include="wwwroot\templates\" />
 	</ItemGroup>
 

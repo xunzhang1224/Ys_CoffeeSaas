@@ -13,7 +13,7 @@ using YSCore.Base.Localization;
 namespace YS.CoffeeMachine.API.Services
 {
     /// <summary>
-    /// 通讯服务调用接口
+    /// 通讯服务调用接
     /// </summary>
     /// <param name="httpClientFactory"></param>
     /// <param name="_configuration"></param>

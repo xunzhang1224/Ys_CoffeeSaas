@@ -75,6 +75,7 @@
         <Folder Include="Application\Services\Http\" />
         <Folder Include="Extensions\Providers\" />
         <Folder Include="Queries\Log\" />
+        <Folder Include="Services\EmailServices\" />
         <Folder Include="wwwroot\templates\" />
     </ItemGroup>
     <ItemGroup>
