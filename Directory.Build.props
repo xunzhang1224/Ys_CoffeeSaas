@@ -1,0 +1,32 @@
+<Project>
+    <PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Version>1.0.0</Version>
+        <!-- 指定规则集文件路径 -->
+        <CodeAnalysisRuleSet>$(MSBuildThisFileDirectory)dotnet.ruleset</CodeAnalysisRuleSet>
+        <!-- 将所有警告视为错误 -->
+        <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+        <!-- 将代码分析警告视为错误 -->
+        <CodeAnalysisTreatWarningsAsErrors>false</CodeAnalysisTreatWarningsAsErrors>
+        <!-- 自动提取XML注释 -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- 禁用默认文件排除规则 -->
+        <NoDefaultExcludes>true</NoDefaultExcludes>
+        <!-- 自动导入基础命名空间 -->
+        <ImplicitUsings>enable</ImplicitUsings>
+        <!-- 启用可空引用类型（值可为 enable、disable 或 warnings） -->
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+    <!--<ItemGroup>
+        <AdditionalFiles Include="$(MSBuildThisFileDirectory)stylecop.json" Link="Properties\stylecop.json" />
+        <AdditionalFiles Include="$(MSBuildThisFileDirectory).editorconfig" Link="Properties\.editorconfig" />
+    </ItemGroup>-->
+	
+	<PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+		<DocumentationFile>bin\Debug\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
+	</PropertyGroup>
+
+	<PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+		<DocumentationFile>bin\Release\$(TargetFramework)\$(AssemblyName).xml</DocumentationFile>
+	</PropertyGroup>
+</Project>

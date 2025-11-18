@@ -1,0 +1,21 @@
+﻿syntax = "proto3";
+
+option csharp_namespace = "YS.CoffeeMachine.API.Grpc";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+
+
+package DefaultgRPCApi;
+
+service DefaultgRPC{
+	rpc GetDefaultInfo(GetDefaultRequest) returns (DefaultInfoResponse);
+	
+}
+
+message GetDefaultRequest {
+	string name = 1; 
+}
+
+message DefaultInfoResponse{
+	string msg = 1;
+}

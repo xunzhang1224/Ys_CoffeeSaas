@@ -1,0 +1,6 @@
+@YS.CoffeeMachine.Iot.Api_HostAddress = http://localhost:5162
+
+GET {{YS.CoffeeMachine.Iot.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

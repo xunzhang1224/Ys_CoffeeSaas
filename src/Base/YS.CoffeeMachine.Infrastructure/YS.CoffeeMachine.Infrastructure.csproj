@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="StyleCop.Analyzers" Version="1.1.118">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="YSCore.Provider.EntityFrameworkCore" Version="1.1.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Migrations\sqlserverMigrations\" />
+    <Folder Include="Repositories\BeverageWarehouseRepositorys\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Base\YS.CoffeeMachine.Domain\YS.CoffeeMachine.Domain.csproj" />
+    <ProjectReference Include="..\..\Base\YS.CoffeeMachine.Localization\YS.CoffeeMachine.Localization.csproj" />
+  </ItemGroup>
+
+</Project>

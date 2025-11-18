@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>d9c1a8e8-9e5b-4b64-accb-87d3fe266698</UserSecretsId>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <DockerfileContext>..\..</DockerfileContext>
+    <DocumentationFile />
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Autofac" Version="8.3.0" />
+    <PackageReference Include="Autofac.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageReference Include="Autofac.Extras.DynamicProxy" Version="7.1.0" />
+    <PackageReference Include="AutoMapper" Version="13.0.1" />
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.21.0" />
+    <PackageReference Include="Scrutor" Version="5.0.2" />
+    <PackageReference Include="Serilog" Version="4.3.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="StyleCop.Analyzers" Version="1.1.118">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="YS.AMP.SDK" Version="1.0.1.17" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Base\YS.CoffeeMachine.Infrastructure\YS.CoffeeMachine.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\Util\YS.CoffeeMachine.Cap\YS.CoffeeMachine.Cap.csproj" />
+    <ProjectReference Include="..\..\Util\YS.Util.Core\YS.Util.Core.csproj" />
+    <ProjectReference Include="..\..\Util\YSCore.CoffeeMachine.SignalR\YSCore.CoffeeMachine.SignalR.csproj" />
+    <ProjectReference Include="..\YS.CoffeeMachine.Iot.Application\YS.CoffeeMachine.Iot.Application.csproj" />
+  </ItemGroup>
+
+</Project>

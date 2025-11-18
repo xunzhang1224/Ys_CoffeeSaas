@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="PlatformEvemts\**" />
+    <EmbeddedResource Remove="PlatformEvemts\**" />
+    <None Remove="PlatformEvemts\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StyleCop.Analyzers" Version="1.1.118">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="YS.Cabinet.Payment" Version="8.0.5" />
+    <PackageReference Include="YSCore.Base" Version="1.1.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\YS.CoffeeMachine.Domain.Shared\YS.CoffeeMachine.Domain.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

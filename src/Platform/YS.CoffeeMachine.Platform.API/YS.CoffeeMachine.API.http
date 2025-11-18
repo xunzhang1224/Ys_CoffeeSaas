@@ -1,0 +1,6 @@
+@YS.CoffeeMachine.Platform.API_HostAddress = http://localhost:5051
+
+GET {{YS.CoffeeMachine.Platform.API_HostAddress}}/BeginTest/
+Accept: application/json
+
+###
