@@ -15,6 +15,7 @@ using YS.CoffeeMachine.Domain.Shared.Const;
 using YS.CoffeeMachine.Domain.Shared.Enum;
 using YS.CoffeeMachine.Infrastructure;
 using YS.CoffeeMachine.Provider.IServices;
+using YSCore.Base.Localization;
 
 namespace YS.CoffeeMachine.API.Extensions.BackTask
 {
@@ -26,6 +27,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
         private readonly IServiceScopeFactory _serviceScopeFactory;
         private readonly ILogger<DeviceWarningTask> _logger;
         private readonly IConfiguration _cfg;
+        private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(30);
 
         /// <summary>
         /// 构造函数
@@ -51,36 +53,34 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
 
             while (!stoppingToken.IsCancellationRequested)
             {
-                using (var scope = _serviceScopeFactory.CreateScope())
+                try
                 {
-                    try
-                    {
-                        var scopedServices = scope.ServiceProvider;
-                        var db = scopedServices.GetRequiredService<CoffeeMachinePlatformDbContext>();
-                        var commonHelper = scopedServices.GetRequiredService<CommonHelper>();
-                        var redis = scopedServices.GetRequiredService<IRedisService>();
-                        var cap = scopedServices.GetRequiredService<IPublishService>();
+                    //var scopedServices = scope.ServiceProvider;
+                    //var db = scopedServices.GetRequiredService<CoffeeMachinePlatformDbContext>();
+                    //var commonHelper = scopedServices.GetRequiredService<CommonHelper>();
+                    //var redis = scopedServices.GetRequiredService<IRedisService>();
+                    //var cap = scopedServices.GetRequiredService<IPublishService>();
 
-                        await ProcessDeviceWarningsAsync(db, commonHelper, redis, cap, stoppingToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "设备预警通知异常");
-                    }
+                    await ProcessDeviceWarningsAsync(stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "设备预警通知异常");
                 }
 
                 await Task.Delay(TimeSpan.FromMinutes(3), stoppingToken);
             }
         }
 
-        private async Task ProcessDeviceWarningsAsync(
-            CoffeeMachinePlatformDbContext db,
-            CommonHelper commonHelper,
-            IRedisService redis,
-            IPublishService cap,
-            CancellationToken stoppingToken)
+        private async Task ProcessDeviceWarningsAsync(CancellationToken stoppingToken)
         {
-            var warningData = await GetWarningDataAsync(db, commonHelper);
+            using var mainScope = _serviceScopeFactory.CreateScope();
+            var mainServices = mainScope.ServiceProvider;
+            var db = mainServices.GetRequiredService<CoffeeMachinePlatformDbContext>();
+            var commonHelper = mainServices.GetRequiredService<CommonHelper>();
+            var redis = mainServices.GetRequiredService<IRedisService>();
+            //var cap = mainServices.GetRequiredService<IPublishService>();
+            var warningData = await GetWarningDataAsync(db, commonHelper, redis);
             if (warningData.WarningsDic == null || !warningData.WarningsDic.Any())
             {
                 _logger.LogInformation("未找到需要处理的预警配置");
@@ -89,12 +89,34 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
 
             var (warningsDic, devices, deviceBases, deviceBindUsers) = warningData;
 
-            foreach (var deviceWarning in warningsDic)
+            _logger.LogInformation($"本次任务需要处理 {warningsDic.Count} 个设备的预警信息");
+
+            var processingTasks = warningsDic.Select(async deviceWarning =>
             {
-                await ProcessSingleDeviceWarningAsync(
-                    deviceWarning, devices, deviceBases, deviceBindUsers,
-                    db, commonHelper, redis, cap, stoppingToken);
-            }
+                await _semaphore.WaitAsync(stoppingToken);
+                try
+                {
+                    using var taskScope = _serviceScopeFactory.CreateScope();
+                    var taskServices = taskScope.ServiceProvider;
+                    var taskDb = taskServices.GetRequiredService<CoffeeMachinePlatformDbContext>();
+                    var taskCommonHelper = taskServices.GetRequiredService<CommonHelper>();
+                    var taskRedis = taskServices.GetRequiredService<IRedisService>();
+                    var taskCap = taskServices.GetRequiredService<IPublishService>();
+
+                    await ProcessSingleDeviceWarningAsync(
+                        deviceWarning, devices, deviceBases, deviceBindUsers,
+                        taskDb, taskCommonHelper, taskRedis, taskCap, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"处理设备预警时发生错误: {deviceWarning.Key}");
+                }
+                finally
+                {
+                    _semaphore.Release();
+                }
+            });
+            await Task.WhenAll(processingTasks);
         }
 
         private async Task<(
@@ -102,38 +124,269 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             List<DeviceInfo> Devices,
             List<DeviceBaseInfo> DeviceBases,
             Dictionary<long, List<long>> DeviceBindUsers
-        )> GetWarningDataAsync(CoffeeMachinePlatformDbContext db, CommonHelper commonHelper)
+        )> GetWarningDataAsync(CoffeeMachinePlatformDbContext db, CommonHelper commonHelper, IRedisService redis)
         {
-            var warningsDic = await db.DeviceEarlyWarnings
+            var allWarnings = await db.DeviceEarlyWarnings
                 .AsNoTracking()
                 .Where(x => x.IsOn &&
                            !string.IsNullOrWhiteSpace(x.WarningValue) &&
                            x.DeviceBaseId != 0)
-                .GroupBy(x => x.DeviceBaseId)
-                .ToDictionaryAsync(g => g.Key, g => g.OrderBy(x => x.CreateTime).ToList());
-
-            if (warningsDic == null || !warningsDic.Any())
-                return (null, null, null, null);
-
-            var deviceBaseIds = warningsDic.Keys.ToList();
-
-            var devices = await db.DeviceInfo
-                .AsNoTracking()
-                .Where(x => deviceBaseIds.Contains(x.DeviceBaseId))
                 .ToListAsync();
 
-            if (devices == null || !devices.Any())
+            if (!allWarnings.Any())
+            {
+                _logger.LogInformation("未找到开启的预警配置");
                 return (null, null, null, null);
+            }
 
-            var deviceBases = await db.DeviceBaseInfo
+            _logger.LogInformation($"找到 {allWarnings.Count} 个开启的预警配置");
+
+            var warningsByDevice = allWarnings
+                .GroupBy(x => x.DeviceBaseId)
+                .ToDictionary(g => g.Key, g => g.OrderBy(x => x.CreateTime).ToList());
+
+            var deviceBaseIds = warningsByDevice.Keys.ToList();
+
+            var deviceBasesQuery = await db.DeviceBaseInfo
                 .AsNoTracking()
                 .Where(x => deviceBaseIds.Contains(x.Id))
+                .Select(x => new DeviceBaseQueryResult
+                {
+                    Id = x.Id,
+                    IsOnline = x.IsOnline,
+                    UpdateOfflineTime = x.UpdateOfflineTime,
+                    Mid = x.Mid,
+                    MachineStickerCode = x.MachineStickerCode
+                })
                 .ToListAsync();
 
-            var deviceIds = devices.Select(x => x.Id).ToList();
-            var deviceBindUsers = await commonHelper.GetUserByDeviceId(deviceIds);
+            var devicesQuery = await db.DeviceInfo
+                .AsNoTracking()
+                .Where(x => deviceBaseIds.Contains(x.DeviceBaseId))
+                .Select(x => new DeviceQueryResult
+                {
+                    Id = x.Id,
+                    DeviceBaseId = x.DeviceBaseId,
+                    Name = x.Name,
+                    EnterpriseinfoId = x.EnterpriseinfoId,
+                    Province = x.Province,
+                    City = x.City,
+                    District = x.District,
+                    Street = x.Street,
+                    DetailedAddress = x.DetailedAddress,
+                    CountryRegionText = x.CountryRegionText
+                })
+                .ToListAsync();
 
-            return (warningsDic, devices, deviceBases, deviceBindUsers);
+            if (!devicesQuery.Any())
+            {
+                _logger.LogWarning("未找到对应的设备信息");
+                return (null, null, null, null);
+            }
+
+            var materialInfos = await db.DeviceMaterialInfo
+                .AsNoTracking()
+                .Where(x => deviceBaseIds.Contains(x.DeviceBaseId))
+                .Select(x => new MaterialInfoQueryResult
+                {
+                    DeviceBaseId = x.DeviceBaseId,
+                    Id = x.Id,
+                    Name = x.Name,
+                    Stock = x.Stock,
+                    LastModifyTime = x.LastModifyTime,
+                    Type = x.Type
+
+                })
+                .ToListAsync();
+
+            var validWarningsDic = new Dictionary<long, List<DeviceEarlyWarnings>>();
+            var validDeviceBaseIds = new List<long>();
+
+            foreach (var deviceBaseId in deviceBaseIds)
+            {
+                var deviceWarnings = warningsByDevice[deviceBaseId];
+                var deviceBase = deviceBasesQuery.FirstOrDefault(x => x.Id == deviceBaseId);
+                var device = devicesQuery.FirstOrDefault(x => x.DeviceBaseId == deviceBaseId);
+
+                if (device == null || deviceBase == null)
+                {
+                    _logger.LogWarning($"未找到设备基础ID {deviceBaseId} 对应的设备信息");
+                    continue;
+                }
+
+                var validWarnings = new List<DeviceEarlyWarnings>();
+
+                foreach (var warning in deviceWarnings)
+                {
+                    var shouldInclude = await ShouldIncludeWarningAsync(
+                        warning, deviceBase, device, materialInfos, redis);
+
+                    if (shouldInclude)
+                        validWarnings.Add(warning);
+                }
+
+                if (validWarnings.Any())
+                {
+                    validWarningsDic[deviceBaseId] = validWarnings;
+                    validDeviceBaseIds.Add(deviceBaseId);
+                }
+            }
+
+            if (!validWarningsDic.Any())
+            {
+                _logger.LogInformation("经过条件筛选，没有需要处理的预警");
+                return (null, null, null, null);
+            }
+
+            _logger.LogInformation($"条件筛选后，剩余 {validWarningsDic.Count} 个设备需要处理预警");
+
+            var validDeviceIds = devicesQuery.Where(x => validDeviceBaseIds.Contains(x.DeviceBaseId))
+                                           .Select(x => x.Id)
+                                           .ToList();
+            var deviceBindUsers = await commonHelper.GetUserByDeviceId(validDeviceIds);
+
+            var validDeviceBases = await db.DeviceBaseInfo
+                .AsNoTracking()
+                .Where(x => validDeviceBaseIds.Contains(x.Id))
+                .ToListAsync();
+
+            var validDevices = await db.DeviceInfo
+                .AsNoTracking()
+                .Where(x => validDeviceBaseIds.Contains(x.DeviceBaseId))
+                .ToListAsync();
+
+            return (validWarningsDic, validDevices, validDeviceBases, deviceBindUsers);
+        }
+
+        /// <summary>
+        /// 判断是否应该包含此预警
+        /// </summary>
+        private async Task<bool> ShouldIncludeWarningAsync(
+            DeviceEarlyWarnings warning,
+            DeviceBaseQueryResult deviceBase,
+            DeviceQueryResult device,
+            List<MaterialInfoQueryResult> materialInfos,
+            IRedisService redis)
+        {
+            try
+            {
+                switch (warning.WarningType)
+                {
+                    case EarlyWarningTypeEnum.OfflineWarning:
+                        return await CheckOfflineWarningAsync(warning, deviceBase, device, redis);
+
+                    case EarlyWarningTypeEnum.ShortageWarning:
+                        return CheckShortageWarning(warning, deviceBase.Id, materialInfos);
+
+                    default:
+                        _logger.LogWarning($"未知的预警类型: {warning.WarningType}");
+                        return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"验证预警条件时发生错误，预警ID: {warning.Id}, 设备基础ID: {deviceBase.Id}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 检查离线预警条件
+        /// </summary>
+        private async Task<bool> CheckOfflineWarningAsync(
+            DeviceEarlyWarnings warning,
+            DeviceBaseQueryResult deviceBase,
+            DeviceQueryResult device,
+            IRedisService redis)
+        {
+            // 设备在线，不需要离线预警
+            if (deviceBase.IsOnline)
+            {
+                _logger.LogDebug($"设备 {deviceBase.Mid} 在线，跳过离线预警");
+                return false;
+            }
+
+            // 没有离线时间，无法计算离线时长
+            if (!deviceBase.UpdateOfflineTime.HasValue)
+            {
+                _logger.LogWarning($"设备 {deviceBase.Mid} 离线但无离线时间");
+                return false;
+            }
+
+            // 检查预警值是否有效
+            if (!double.TryParse(warning.WarningValue, out double threshold) || threshold <= 0)
+            {
+                _logger.LogWarning($"设备 {deviceBase.Mid} 的离线预警阈值配置无效: {warning.WarningValue}");
+                return false;
+            }
+
+            // 检查是否已经发送过该预警
+            var cacheKey = string.Format(CacheConst.OffOnlineTask, deviceBase.Mid);
+            var lastOfflineTimeStr = await redis.GetStringAsync(cacheKey);
+
+            if (!string.IsNullOrWhiteSpace(lastOfflineTimeStr))
+            {
+                if (DateTime.TryParse(lastOfflineTimeStr, out DateTime lastOfflineTime) &&
+                    lastOfflineTime == deviceBase.UpdateOfflineTime.Value)
+                {
+                    _logger.LogDebug($"设备 {deviceBase.Mid} 的离线预警已发送过（时间: {lastOfflineTime}）");
+                    return false;
+                }
+            }
+
+            // 计算离线时长并比较阈值
+            var offlineDuration = YS.Util.Core.Util.GetWholeHHDifference(
+                DateTime.UtcNow, deviceBase.UpdateOfflineTime.Value);
+
+            if (offlineDuration >= threshold)
+            {
+                _logger.LogInformation($"设备 {deviceBase.Mid} 满足离线预警条件，离线时长: {offlineDuration}小时，阈值: {threshold}小时");
+                return true;
+            }
+
+            _logger.LogDebug($"设备 {deviceBase.Mid} 离线时长 {offlineDuration}小时 未达到阈值 {threshold}小时");
+            return false;
+        }
+
+        /// <summary>
+        /// 检查缺料预警条件
+        /// </summary>
+        private bool CheckShortageWarning(
+            DeviceEarlyWarnings warning,
+            long deviceBaseId,
+            List<MaterialInfoQueryResult> materialInfos)
+        {
+            if (!warning.DeviceMaterialId.HasValue)
+            {
+                _logger.LogWarning($"设备基础ID {deviceBaseId} 的缺料预警未配置物料ID");
+                return false;
+            }
+
+            var material = materialInfos
+                .FirstOrDefault(x => x.DeviceBaseId == deviceBaseId && x.Id == warning.DeviceMaterialId.Value);
+
+            if (material == null)
+            {
+                _logger.LogWarning($"未找到设备基础ID {deviceBaseId} 的物料ID {warning.DeviceMaterialId.Value}");
+                return false;
+            }
+
+            // 检查预警值是否有效
+            if (!int.TryParse(warning.WarningValue, out int threshold))
+            {
+                _logger.LogWarning($"设备基础ID {deviceBaseId} 的缺料预警阈值配置无效: {warning.WarningValue}");
+                return false;
+            }
+
+            // 库存小于等于预警阈值
+            if (material.Stock <= threshold)
+            {
+                _logger.LogInformation($"设备基础ID {deviceBaseId} 的物料 {material.Name} 满足缺料预警条件，库存: {material.Stock}，阈值: {threshold}");
+                return true;
+            }
+
+            _logger.LogDebug($"设备基础ID {deviceBaseId} 的物料 {material.Name} 库存 {material.Stock} 充足，阈值: {threshold}");
+            return false;
         }
 
         private async Task ProcessSingleDeviceWarningAsync(
@@ -150,10 +403,14 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             var deviceBaseId = deviceWarning.Key;
             var warnings = deviceWarning.Value;
 
-            _logger.LogInformation($"预警任务执行设备----》deviceBaseId:{deviceBaseId};warnings:{JsonConvert.SerializeObject(warnings)}");
+            _logger.LogInformation($"处理设备预警 ----》deviceBaseId: {deviceBaseId}, 预警数量: {warnings.Count}");
 
             var device = devices.FirstOrDefault(x => x.DeviceBaseId == deviceBaseId);
-            if (device == null) return;
+            if (device == null)
+            {
+                _logger.LogWarning($"未找到设备基础ID {deviceBaseId} 对应的设备信息");
+                return;
+            }
 
             var notificationConfig = await GetNotificationConfigAsync(device, deviceBindUsers, db);
             if (!notificationConfig.HasAnyNotification)
@@ -163,7 +420,11 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             }
 
             var deviceBase = deviceBases.FirstOrDefault(x => x.Id == deviceBaseId);
-            if (deviceBase == null) return;
+            if (deviceBase == null)
+            {
+                _logger.LogWarning($"未找到设备基础ID {deviceBaseId} 对应的设备基础信息");
+                return;
+            }
 
             var templates = await GetNotificationTemplatesAsync(device.EnterpriseinfoId, db);
             if (templates == null)
@@ -209,12 +470,15 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
 
                 config.Emails = superAdmins.Where(x => !string.IsNullOrWhiteSpace(x.Email))
                                           .Select(x => x.Email)
+                                          .Distinct()
                                           .ToList();
                 config.PhoneNumbers = superAdmins.Where(x => !string.IsNullOrWhiteSpace(x.Phone))
                                                 .Select(x => x.Phone)
+                                                .Distinct()
                                                 .ToList();
                 config.Accounts = superAdmins.Where(x => !string.IsNullOrWhiteSpace(x.Account))
                                             .Select(x => x.Account)
+                                            .Distinct()
                                             .ToList();
             }
             else
@@ -233,15 +497,20 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
 
                 config.Emails = users.Where(x => emailUserIds.Contains(x.Id) && !string.IsNullOrWhiteSpace(x.Email))
                                    .Select(x => x.Email)
+                                   .Distinct()
                                    .ToList();
 
                 config.PhoneNumbers = users.Where(x => smsUserIds.Contains(x.Id) && !string.IsNullOrWhiteSpace(x.Phone))
                                          .Select(x => x.Phone)
+                                         .Distinct()
                                          .ToList();
                 config.Accounts = users.Where(x => !string.IsNullOrWhiteSpace(x.Account))
                                       .Select(x => x.Account)
+                                      .Distinct()
                                       .ToList();
             }
+
+            _logger.LogDebug($"设备 {device.Name} 通知配置 - 邮件: {config.Emails.Count} 个, 短信: {config.PhoneNumbers.Count} 个, 账号: {config.Accounts.Count} 个");
 
             return config;
         }
@@ -259,7 +528,11 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
                 .Select(x => new { x.AreaRelationId })
                 .FirstOrDefaultAsync();
 
-            if (areaInfo?.AreaRelationId == null) return null;
+            if (areaInfo?.AreaRelationId == null)
+            {
+                _logger.LogWarning($"企业 {enterpriseId} 未配置区域关系");
+                return null;
+            }
 
             var language = await db.AreaRelation
                 .AsNoTracking()
@@ -267,7 +540,11 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
                 .Select(x => x.Language)
                 .FirstOrDefaultAsync();
 
-            if (string.IsNullOrWhiteSpace(language)) return null;
+            if (string.IsNullOrWhiteSpace(language))
+            {
+                _logger.LogWarning($"企业 {enterpriseId} 的区域关系 {areaInfo.AreaRelationId} 未配置语言");
+                return null;
+            }
 
             var templates = await db.LanguageText
                 .AsNoTracking()
@@ -283,7 +560,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
 
             if (string.IsNullOrWhiteSpace(offlineTemplate) || string.IsNullOrWhiteSpace(shortageTemplate) || string.IsNullOrWhiteSpace(subject))
             {
-                _logger.LogWarning($"未配置邮件模板相关信息！");
+                _logger.LogWarning($"企业 {enterpriseId} 未完整配置邮件模板信息");
                 return null;
             }
 
@@ -341,8 +618,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
                 stoppingToken.ThrowIfCancellationRequested();
             }
 
-            _logger.LogInformation($"设备----》{device.Name};离线信息-------》hasOfflineWarning：{hasOfflineWarning}；offlineWarningMessage{offlineWarningMessage}；offlineWarningTime{offlineWarningTime}");
-            _logger.LogInformation($"设备----》{device.Name};缺料信息-------》{JsonConvert.SerializeObject(shortageMessages)}");
+            _logger.LogInformation($"设备 {device.Name} 预警结果 - 离线: {hasOfflineWarning}, 缺料: {shortageMessages.Count} 种物料");
 
             // 统一发送通知
             await SendNotificationsAsync(
@@ -362,38 +638,19 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             CommonHelper commonHelper,
             IRedisService redis)
         {
+            // 由于在数据源阶段已经验证过条件，这里主要组装消息
             if (!deviceBase.IsOnline &&
                 deviceBase.UpdateOfflineTime.HasValue &&
                 !string.IsNullOrWhiteSpace(warning.WarningValue))
             {
-                var cacheKey = string.Format(CacheConst.OffOnlineTask, deviceBase.Mid);
-                var lastOfflineTimeStr = await redis.GetStringAsync(cacheKey);
+                var localTime = await commonHelper.GetDateTimeByEnterprise(
+                    device.EnterpriseinfoId, deviceBase.UpdateOfflineTime.Value);
 
-                if (string.IsNullOrWhiteSpace(lastOfflineTimeStr) ||
-                    Convert.ToDateTime(lastOfflineTimeStr) != deviceBase.UpdateOfflineTime.Value)
-                {
-                    var offlineDuration = YS.Util.Core.Util.GetWholeHHDifference(
-                        DateTime.UtcNow, deviceBase.UpdateOfflineTime.Value);
+                var messageBody = string.Format(templates.OfflineTemplate,
+                    GetAddress(device), device.Name, deviceBase.MachineStickerCode,
+                    localTime.ToString("yyyy-MM-dd HH:mm:ss"));
 
-                    var threshold = Convert.ToDouble(warning.WarningValue);
-
-                    if (offlineDuration >= threshold)
-                    {
-                        var localTime = await commonHelper.GetDateTimeByEnterprise(
-                            device.EnterpriseinfoId, deviceBase.UpdateOfflineTime.Value);
-
-                        var messageBody = string.Format(templates.OfflineTemplate,
-                            GetAddress(device) ?? "未知", device.Name, deviceBase.MachineStickerCode,
-                            localTime.ToString("yyyy-MM-dd HH:mm:ss"));
-
-                        // 更新缓存，防止重复推送
-                        await redis.SetStringAsync(cacheKey,
-                            deviceBase.UpdateOfflineTime.Value.ToString(),
-                            TimeSpan.FromDays(1));
-
-                        return (true, messageBody, localTime);
-                    }
-                }
+                return (true, messageBody, localTime);
             }
 
             return (false, string.Empty, DateTime.MinValue);
@@ -418,7 +675,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             // 离线预警
             if (hasOfflineWarning && !string.IsNullOrEmpty(offlineMessage))
             {
-                var smsMessage = JsonConvert.SerializeObject(new { device_address = GetAddress(device) ?? "未知", device_code = deviceBase.MachineStickerCode, time = updateOfflineTime.ToString("yyyy-MM-dd HH:mm:ss") });
+                var smsMessage = JsonConvert.SerializeObject(new { device_address = GetAddress(device), device_code = deviceBase.MachineStickerCode, time = updateOfflineTime.ToString("yyyy-MM-dd HH:mm:ss") });
                 var SmsMessageDic = new Dictionary<string, string>() { { SmsConst.SmsOffLineTemplate, smsMessage } };
 
                 notifications.Add((offlineMessage, SmsMessageDic, EarlyWarningTypeEnum.OfflineWarning));
@@ -435,12 +692,12 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
                     device.CountryRegionText, device.Name, deviceBase.MachineStickerCode,
                     localTime.ToString("yyyy-MM-dd"), materialNames);
 
-                var smsMessage = JsonConvert.SerializeObject(new { device_address = GetAddress(device) ?? "未知", device_code = deviceBase.MachineStickerCode, material_name = materialNames, detection_time = localTime.ToString("yyyy-MM-dd") });
+                var smsMessage = JsonConvert.SerializeObject(new { device_address = GetAddress(device), device_code = deviceBase.MachineStickerCode, material_name = materialNames, detection_time = localTime.ToString("yyyy-MM-dd") });
                 var SmsMessageDic = new Dictionary<string, string>() { { SmsConst.SmsShortageTemplate, smsMessage } };
                 notifications.Add((emailMessage, SmsMessageDic, EarlyWarningTypeEnum.ShortageWarning));
             }
 
-            _logger.LogInformation($"预警通知----------------》{JsonConvert.SerializeObject(notifications)};通知邮件集合：{JsonConvert.SerializeObject(notificationConfig.Emails)};通知短信集合：{JsonConvert.SerializeObject(notificationConfig.PhoneNumbers)}");
+            _logger.LogInformation($"设备 {device.Name} 准备发送 {notifications.Count} 条预警通知");
 
             // 批量发送通知
             foreach (var (emailMessage, SmsMessageDic, type) in notifications)
@@ -502,7 +759,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
                 var material = materialInfos.FirstOrDefault(x => x.Id == warning.DeviceMaterialId.Value);
                 if (material != null && material.Stock <= Convert.ToInt32(warning.WarningValue))
                 {
-                    shortageMessages.Add(material.Name);
+                    shortageMessages.Add(material.Type == MaterialTypeEnum.Cassette ? material.Name : L.Text[$"MaterialTypeEnum{(int)material.Type}"]);
                     shortageTimes.Add(material.LastModifyTime);
                 }
             }
@@ -555,6 +812,7 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             };
 
             await cap.SendMessage(CapConst.Email, emailDto);
+            _logger.LogInformation($"已发送邮件通知给设备 {device.Name}，收件人: {emails.Count} 个");
         }
 
         private async Task SendSmsNotificationAsync(DeviceInfo device, List<string> phoneNumbers, Dictionary<string, string> messageBodyDic, string subject, IPublishService cap)
@@ -570,14 +828,51 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             };
 
             await cap.SendMessage(CapConst.Sms, smsDto);
+            _logger.LogInformation($"已发送短信通知给设备 {device.Name}，收件人: {phoneNumbers.Count} 个");
         }
 
         private string GetAddress(DeviceInfo device)
         {
-            return $"{device.Province}{device.City}{device.District}{device.Street}{device.DetailedAddress}";
+            var adr = $"{device.Province}{device.City}{device.District}{device.Street}{device.DetailedAddress}";
+            if (string.IsNullOrWhiteSpace(adr))
+                adr = "未知";
+            return adr;
         }
 
-        // 辅助类
+        // 查询结果辅助类
+        private class DeviceBaseQueryResult
+        {
+            public long Id { get; set; }
+            public bool IsOnline { get; set; }
+            public DateTime? UpdateOfflineTime { get; set; }
+            public string Mid { get; set; }
+            public string MachineStickerCode { get; set; }
+        }
+
+        private class DeviceQueryResult
+        {
+            public long Id { get; set; }
+            public long DeviceBaseId { get; set; }
+            public string Name { get; set; }
+            public long EnterpriseinfoId { get; set; }
+            public string Province { get; set; }
+            public string City { get; set; }
+            public string District { get; set; }
+            public string Street { get; set; }
+            public string DetailedAddress { get; set; }
+            public string CountryRegionText { get; set; }
+        }
+
+        private class MaterialInfoQueryResult
+        {
+            public long DeviceBaseId { get; set; }
+            public long Id { get; set; }
+            public string Name { get; set; }
+            public int Stock { get; set; }
+            public MaterialTypeEnum Type { get; set; }
+            public DateTime? LastModifyTime { get; set; }
+        }
+
         private class NotificationConfig
         {
             public List<string> Emails { get; set; } = new List<string>();
@@ -593,5 +888,6 @@ namespace YS.CoffeeMachine.API.Extensions.BackTask
             public string OfflineTemplate { get; set; } = string.Empty;
             public string ShortageTemplate { get; set; } = string.Empty;
         }
+
     }
 }
